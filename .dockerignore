@@ -1,0 +1,39 @@
+# Git files
+.git/
+.gitignore
+
+# Nextflow work directories and outputs
+work/
+results/
+.nextflow/
+.nextflow.log*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+
+# Data files (exclude from image, mount at runtime)
+data/
+
+# Development environment
+.envrc
+devenv.nix
+devenv.yaml
+devenv.lock
+.python-version
+
+# Documentation
+README.md
+CLAUDE.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
