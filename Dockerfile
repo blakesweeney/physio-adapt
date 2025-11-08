@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     unzip \
     infernal \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Install NCBI datasets tool
