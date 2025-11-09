@@ -2,12 +2,19 @@
 FROM python:3.13-slim AS base
 
 # Install system dependencies
+# Note: infernal package includes both Infernal tools (cmscan, cmalign, cmfetch, etc.)
+# and Easel utilities (esl-sfetch, esl-alimask, etc.)
+# HMMER is also installed as it provides additional easel utilities
 RUN apt-get update && apt-get install -y \
     curl \
     unzip \
     infernal \
+    hmmer \
     procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Verify easel utilities are available
+RUN esl-sfetch -h > /dev/null 2>&1 || { echo "ERROR: esl-sfetch not found"; exit 1; }
 
 # Install NCBI datasets tool
 RUN curl -L https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets -o /usr/local/bin/datasets \
