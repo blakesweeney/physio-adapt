@@ -626,7 +626,11 @@ workflow {
     Channel.fromPath(params.rna_types_file, checkIfExists: true) | set { rna_types }
 
     // Extract selected RNA type models and filter clanin
-    EXTRACT_MODELS_BY_TYPE(rfam, rfam_metadata, rna_types) | set { models_and_families }
+    rfam \
+    | combine(rfam_metadata) \
+    | combine(rna_types) \
+    | EXTRACT_MODELS_BY_TYPE \
+    | set { models_and_families }
 
     // Split the tuple to get files separately
     models_and_families \
@@ -638,7 +642,10 @@ workflow {
     | map { cm_files, clanin -> clanin } \
     | set { rfam_clanin }
 
-    FILTER_CLANIN(rfam_clanin, selected_families) | set { subset_clanin }
+    rfam_clanin \
+    | combine(selected_families) \
+    | FILTER_CLANIN \
+    | set { subset_clanin }
 
     // Process genomes
     bacdrive \
@@ -707,9 +714,8 @@ workflow {
     below_threshold_results \
     | map { accession, fasta, tblout -> tblout } \
     | collect \
-    | CONCATENATE_BELOW_THRESHOLD_TBLOUT(
-        above_concat_tblout_and_map.map { tblout, mapping -> mapping }
-    ) \
+    | combine(above_concat_tblout_and_map.map { tblout, mapping -> mapping }) \
+    | CONCATENATE_BELOW_THRESHOLD_TBLOUT \
     | set { below_concat_tblout_and_map }
 
     below_threshold_results \
@@ -719,16 +725,17 @@ workflow {
     | set { below_concat_fasta }
 
     // Build SQLite database with concatenated files
-    BUILD_SQLITE_DATABASE(
-        above_concat_tblout_and_map,
-        above_concat_fasta,
-        below_concat_tblout_and_map,
-        below_concat_fasta,
-        bacdive_jsonl,
-        rfam_metadata
-    ) \
+    above_concat_tblout_and_map \
+    | combine(above_concat_fasta) \
+    | combine(below_concat_tblout_and_map) \
+    | combine(below_concat_fasta) \
+    | combine(bacdive_jsonl) \
+    | combine(rfam_metadata) \
+    | BUILD_SQLITE_DATABASE \
     | set { database }
 
     // Create alignments for all families and add to database
-    CREATE_ALIGNMENTS(database, rfam.map { cm_files, clanin -> cm_files })
+    database \
+    | combine(rfam.map { cm_files, clanin -> cm_files }) \
+    | CREATE_ALIGNMENTS
 }
