@@ -112,9 +112,7 @@ process EXTRACT_MODELS_BY_TYPE {
     time '2 h'
 
     input:
-    tuple path(rfam_cm), path(clanin)
-    tuple path(family_txt), path(clan_txt), path(clan_membership_txt)
-    path rna_types_file
+    tuple path(rfam_cm), path(clanin), path(family_txt), path(clan_txt), path(clan_membership_txt), path(rna_types_file)
 
     output:
     tuple path("subset.cm*"), path("selected_families.txt")
@@ -159,8 +157,7 @@ process FILTER_CLANIN {
     memory '1 GB'
 
     input:
-    path clanin
-    path families_file
+    tuple path(clanin), path(families_file)
 
     output:
     path "subset.clanin"
@@ -554,12 +551,7 @@ process BUILD_SQLITE_DATABASE {
     publishDir "${params.outdir}/database", mode: 'copy'
 
     input:
-    tuple path(above_tblout), path(seq_map_partial)
-    path above_fasta
-    tuple path(below_tblout), path(seq_map_complete)
-    path below_fasta
-    path bacdive_jsonl
-    tuple path(family_txt), path(clan_txt), path(clan_membership_txt)
+    tuple path(above_tblout), path(seq_map_partial), path(above_fasta), path(below_tblout), path(seq_map_complete), path(below_fasta), path(bacdive_jsonl), path(family_txt), path(clan_txt), path(clan_membership_txt)
 
     output:
     path "rfam_hits.db"
@@ -592,8 +584,7 @@ process CREATE_ALIGNMENTS {
     publishDir "${params.outdir}/alignments", mode: 'copy', pattern: "*.sto"
 
     input:
-    path database
-    path rfam_cm
+    tuple path(database), path(rfam_cm)
 
     output:
     path "rfam_hits_with_alignments.db"
@@ -629,13 +620,6 @@ workflow {
     rfam \
     | combine(rfam_metadata) \
     | combine(rna_types) \
-    | map { rfam_cm, clanin, family_txt, clan_txt, clan_membership_txt, rna_types_file ->
-        tuple(
-            tuple(rfam_cm, clanin),
-            tuple(family_txt, clan_txt, clan_membership_txt),
-            rna_types_file
-        )
-    } \
     | EXTRACT_MODELS_BY_TYPE \
     | set { models_and_families }
 
@@ -651,7 +635,6 @@ workflow {
 
     rfam_clanin \
     | combine(selected_families) \
-    | map { clanin, families_file -> tuple(clanin, families_file) } \
     | FILTER_CLANIN \
     | set { subset_clanin }
 
@@ -739,22 +722,11 @@ workflow {
     | combine(below_concat_fasta) \
     | combine(bacdive_jsonl) \
     | combine(rfam_metadata) \
-    | map { above_tblout, seq_map_partial, above_fasta, below_tblout, seq_map_complete, below_fasta, bacdive_jsonl, family_txt, clan_txt, clan_membership_txt ->
-        tuple(
-            tuple(above_tblout, seq_map_partial),
-            above_fasta,
-            tuple(below_tblout, seq_map_complete),
-            below_fasta,
-            bacdive_jsonl,
-            tuple(family_txt, clan_txt, clan_membership_txt)
-        )
-    } \
     | BUILD_SQLITE_DATABASE \
     | set { database }
 
     // Create alignments for all families and add to database
     database \
     | combine(rfam.map { cm_files, clanin -> cm_files }) \
-    | map { db, rfam_cm -> tuple(db, rfam_cm) } \
     | CREATE_ALIGNMENTS
 }
