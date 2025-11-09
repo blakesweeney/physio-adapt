@@ -91,14 +91,14 @@ process DOWNLOAD_RFAM_METADATA {
     publishDir "${params.outdir}/rfam_metadata", mode: 'copy'
 
     output:
-    tuple path("family.txt.gz"), path("clan.txt.gz"), path("clan_membership.txt.gz")
+    tuple path("family.txt"), path("clan.txt"), path("clan_membership.txt")
 
     script:
     """
-    # Download Rfam database files from FTP
-    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/family.txt.gz -o family.txt.gz
-    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/clan.txt.gz -o clan.txt.gz
-    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/clan_membership.txt.gz -o clan_membership.txt.gz
+    # Download and uncompress Rfam database files from FTP
+    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/family.txt.gz | gunzip > family.txt
+    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/clan.txt.gz | gunzip > clan.txt
+    curl -L https://ftp.ebi.ac.uk/pub/databases/Rfam/15.0/database_files/clan_membership.txt.gz | gunzip > clan_membership.txt
     """
 }
 
@@ -113,7 +113,7 @@ process EXTRACT_MODELS_BY_TYPE {
 
     input:
     tuple path(rfam_cm), path(clanin)
-    tuple path(family_txt_gz), path(clan_txt_gz), path(clan_membership_txt_gz)
+    tuple path(family_txt), path(clan_txt), path(clan_membership_txt)
     path rna_types_file
 
     output:
@@ -121,10 +121,32 @@ process EXTRACT_MODELS_BY_TYPE {
 
     script:
     """
-    # Need to compress Rfam.cm for extract_rfam_models.py
-    gzip -c ${rfam_cm[0]} > Rfam.cm.gz
+    # Extract Rfam accessions for families matching RNA types
+    # Column 1 is rfam_acc, column 19 is type (e.g., "Cis-reg; riboswitch;")
 
-    extract_rfam_models.py Rfam.cm.gz ${family_txt_gz} ${rna_types_file} subset.cm selected_families.txt
+    # Read RNA types from file (skip comments and empty lines)
+    grep -v '^#' ${rna_types_file} | grep -v '^\$' > rna_types_clean.txt
+
+    # Extract column 1 (rfam_acc) and column 19 (type) from family.txt
+    # Then grep for lines matching any RNA type, then extract just the accession
+    cat ${family_txt} | awk 'BEGIN{FS="\\t"; OFS="\\t"} NR>1 {print \$1, \$19}' | \\
+        grep -f rna_types_clean.txt | \\
+        awk '{print \$1}' | \\
+        sort -u > selected_families.txt
+
+    # Check if we found any families
+    NUM_FAMILIES=\$(wc -l < selected_families.txt)
+
+    if [ "\${NUM_FAMILIES}" -eq 0 ]; then
+        echo "ERROR: No families found for specified RNA types" >&2
+        exit 1
+    fi
+
+    # Extract models using cmfetch (it can read a file of accessions with -f)
+    cmfetch -f ${rfam_cm[0]} selected_families.txt > subset.cm
+
+    # Press the CM file for faster searching
+    cmpress -F subset.cm
     """
 }
 
@@ -145,7 +167,11 @@ process FILTER_CLANIN {
 
     script:
     """
-    filter_rfam_clanin.py ${clanin} ${families_file} subset.clanin
+    # Filter clanin to keep only clans containing at least one selected family
+    # Clanin format: CL00001 RF00001 RF00002 RF00003 ...
+    # Keep entire line if any family accession matches our selected families
+
+    grep -f ${families_file} ${clanin} > subset.clanin || touch subset.clanin
     """
 }
 
@@ -238,26 +264,20 @@ process EXTRACT_HIT_SEQUENCES {
     """
     # Parse tblout file and extract sequences using esl-sfetch
     # tblout format (--fmt 2): columns are space-separated
-    # Column 1: target name (Rfam accession)
-    # Column 2: target accession
-    # Column 3: query name (sequence name)
-    # Column 4: query accession
-    # Columns 8-9: seq from/to (start-stop positions)
+    # Column 3: query name (sequence accession, e.g., GG693512.1)
+    # Columns 10-11: seq from/to (start-stop positions)
 
     # Create index for genome file
     esl-sfetch --index ${genome_fna}
 
-    # Extract coordinates and Rfam accessions from tblout
-    grep -v '^#' ${tblout} | awk '{print \$3"/"\$8"-"\$9}' > coords.txt
-    grep -v '^#' ${tblout} | awk '{print \$1}' > rfam_accs.txt
+    # Extract coordinates from tblout: query_name/seq_from-seq_to
+    grep -v '^#' ${tblout} | awk '{print \$3"/"\$10"-"\$11}' > coords.txt
 
     # Fetch all sequences at once using esl-sfetch
     # -C: use coordinate format (seqname/start-stop)
     # -f: read coordinates from file
     if [ -s coords.txt ]; then
-        esl-sfetch -Cf ${genome_fna} coords.txt | \\
-        paste -d' ' - rfam_accs.txt | \\
-        awk '/^>/ {print \$1, \$2; next} {print}' > ${accession}_hits.fa
+        esl-sfetch -Cf ${genome_fna} coords.txt > ${accession}_hits.fa
     else
         # Create empty file if no hits
         touch ${accession}_hits.fa
@@ -310,8 +330,6 @@ process EXTRACT_MISSING_MODELS {
 
         # Press the CM file for faster searching
         cmpress ${accession}.missing.cm
-    else
-        echo "No missing models for ${accession}"
     fi
     """
 }
@@ -334,7 +352,7 @@ process CMSCAN_BELOW_THRESHOLD {
     script:
     """
     # Run cmscan with:
-    # -T 0: report all hits with score > 0 (no threshold)
+    # -T 20: report all hits with score > 0 (no threshold)
     # --rfam: use Rfam-specific settings
     # --nohmmonly: don't use HMM-only mode for any models
     # --clanin: enable clan competition to avoid overlapping hits
@@ -395,26 +413,20 @@ process EXTRACT_HIT_SEQUENCES_BELOW_THRESHOLD {
     """
     # Parse tblout file and extract sequences using esl-sfetch
     # tblout format (--fmt 2): columns are space-separated
-    # Column 1: target name (Rfam accession)
-    # Column 2: target accession
-    # Column 3: query name (sequence name)
-    # Column 4: query accession
-    # Columns 8-9: seq from/to (start-stop positions)
+    # Column 3: query name (sequence accession, e.g., GG693512.1)
+    # Columns 10-11: seq from/to (start-stop positions)
 
     # Create index for genome file
     esl-sfetch --index ${genome_fna}
 
-    # Extract coordinates and Rfam accessions from tblout
-    grep -v '^#' ${tblout} | awk '{print \$3"/"\$8"-"\$9}' > coords.txt
-    grep -v '^#' ${tblout} | awk '{print \$1}' > rfam_accs.txt
+    # Extract coordinates from tblout: query_name/seq_from-seq_to
+    grep -v '^#' ${tblout} | awk '{print \$3"/"\$10"-"\$11}' > coords.txt
 
     # Fetch all sequences at once using esl-sfetch
     # -C: use coordinate format (seqname/start-stop)
     # -f: read coordinates from file
     if [ -s coords.txt ]; then
-        esl-sfetch -Cf ${genome_fna} coords.txt | \\
-        paste -d' ' - rfam_accs.txt | \\
-        awk '/^>/ {print \$1, \$2; next} {print}' > ${accession}_below_threshold_hits.fa
+        esl-sfetch -Cf ${genome_fna} coords.txt > ${accession}_below_threshold_hits.fa
     else
         # Create empty file if no hits
         touch ${accession}_below_threshold_hits.fa
@@ -423,7 +435,116 @@ process EXTRACT_HIT_SEQUENCES_BELOW_THRESHOLD {
 }
 
 /*
- * Process 7: Build SQLite database from all hits and Rfam metadata
+ * Process 7A: Concatenate above-threshold tblout files and create sequence mapping
+ */
+process CONCATENATE_ABOVE_THRESHOLD_TBLOUT {
+    tag "concat_above_tblout"
+    cpus 1
+    memory '4 GB'
+    time '1 h'
+
+    input:
+    path tblout_files
+
+    output:
+    tuple path("above_threshold_all.tblout"), path("sequence_to_genome.map")
+
+    script:
+    """
+    # Concatenate tblout files (strip comments)
+    find . -name '*.tblout' -type f -exec grep -v '^#' {} \\; > above_threshold_all.tblout
+
+    # Create sequence to genome mapping
+    # For each tblout file, extract filename and column 4 (query_name)
+    find . -name '*.tblout' -type f -exec sh -c '
+        genome_id=\$(basename "{}" .tblout)
+        grep -v "^#" "{}" | awk -v gid="\$genome_id" "{print \\\$4 \"\\t\" gid}"
+    ' \\; > sequence_to_genome.map
+    """
+}
+
+/*
+ * Process 7B: Concatenate above-threshold FASTA files
+ */
+process CONCATENATE_ABOVE_THRESHOLD_FASTA {
+    tag "concat_above_fasta"
+    cpus 1
+    memory '4 GB'
+    time '1 h'
+
+    input:
+    path fasta_files
+
+    output:
+    path "above_threshold_all.fa"
+
+    script:
+    """
+    find . -name '*.fa' -type f -print0 | xargs -0 cat > above_threshold_all.fa
+    """
+}
+
+/*
+ * Process 7C: Concatenate below-threshold tblout files and add to sequence mapping
+ */
+process CONCATENATE_BELOW_THRESHOLD_TBLOUT {
+    tag "concat_below_tblout"
+    cpus 1
+    memory '4 GB'
+    time '1 h'
+
+    input:
+    path tblout_files
+    path above_mapping
+
+    output:
+    tuple path("below_threshold_all.tblout"), path("sequence_to_genome_all.map")
+
+    script:
+    """
+    # Concatenate tblout files (strip comments)
+    find . -name '*.tblout' -type f -exec grep -v '^#' {} \\; > below_threshold_all.tblout
+
+    # Start with above-threshold mapping and add below-threshold sequences
+    cp ${above_mapping} sequence_to_genome_all.map
+
+    # Add below-threshold mappings (handle various filename patterns)
+    find . -name '*.tblout' -type f -exec sh -c '
+        fname=\$(basename "{}")
+        genome_id=\${fname%.below_threshold.tblout}
+        genome_id=\${genome_id%.best_hits.tblout}
+        genome_id=\${genome_id%.tblout}
+        grep -v "^#" "{}" | awk -v gid="\$genome_id" "{print \\\$4 \"\\t\" gid}"
+    ' \\; >> sequence_to_genome_all.map
+
+    # Remove duplicates and sort
+    sort -u sequence_to_genome_all.map -o sequence_to_genome_all.map
+    """
+}
+
+/*
+ * Process 7D: Concatenate below-threshold FASTA files
+ */
+process CONCATENATE_BELOW_THRESHOLD_FASTA {
+    tag "concat_below_fasta"
+    cpus 1
+    memory '4 GB'
+    time '1 h'
+
+    input:
+    path fasta_files
+
+    output:
+    path "below_threshold_all.fa"
+
+    script:
+    """
+    find . -name '*.fa' -type f -print0 | xargs -0 cat > below_threshold_all.fa
+    """
+}
+
+/*
+ * Process 7E: Build SQLite database from concatenated files
  */
 process BUILD_SQLITE_DATABASE {
     tag "build_database"
@@ -433,10 +554,10 @@ process BUILD_SQLITE_DATABASE {
     publishDir "${params.outdir}/database", mode: 'copy'
 
     input:
-    path above_threshold_tblout_files
-    path above_threshold_fasta_files
-    path below_threshold_tblout_files
-    path below_threshold_fasta_files
+    tuple path(above_tblout), path(seq_map_partial)
+    path above_fasta
+    tuple path(below_tblout), path(seq_map_complete)
+    path below_fasta
     path bacdive_jsonl
     tuple path(family_txt), path(clan_txt), path(clan_membership_txt)
 
@@ -445,50 +566,13 @@ process BUILD_SQLITE_DATABASE {
 
     script:
     """
-    # Create mapping file: sequence_accession -> genome_id
-    echo "Creating sequence to genome mapping..."
-    > sequence_to_genome.map
-    for tblout in ${above_threshold_tblout_files}; do
-        # Extract genome ID from filename (e.g., GCA_000001234.tblout -> GCA_000001234)
-        genome_id=\$(basename "\${tblout}" .tblout)
-        # Extract unique sequence accessions (column 3) and map to genome_id
-        grep -v '^#' "\${tblout}" | awk -v gid="\${genome_id}" '{print \$3 "\\t" gid}' >> sequence_to_genome.map || true
-    done
-    for tblout in ${below_threshold_tblout_files}; do
-        genome_id=\$(basename "\${tblout}" .best_hits.tblout)
-        genome_id=\$(basename "\${genome_id}" .tblout)
-        grep -v '^#' "\${tblout}" | awk -v gid="\${genome_id}" '{print \$3 "\\t" gid}' >> sequence_to_genome.map || true
-    done
-    # Remove duplicates and sort
-    sort -u sequence_to_genome.map > sequence_to_genome_unique.map
-
-    # Concatenate all above-threshold tblout files (strip comments)
-    echo "Concatenating above-threshold tblout files..."
-    for tblout in ${above_threshold_tblout_files}; do
-        grep -v '^#' "\${tblout}" >> above_threshold_all.tblout || true
-    done
-
-    # Concatenate all above-threshold FASTA files
-    echo "Concatenating above-threshold FASTA files..."
-    cat ${above_threshold_fasta_files} > above_threshold_all.fa
-
-    # Concatenate all below-threshold tblout files (strip comments)
-    echo "Concatenating below-threshold tblout files..."
-    for tblout in ${below_threshold_tblout_files}; do
-        grep -v '^#' "\${tblout}" >> below_threshold_all.tblout || true
-    done
-
-    # Concatenate all below-threshold FASTA files
-    echo "Concatenating below-threshold FASTA files..."
-    cat ${below_threshold_fasta_files} > below_threshold_all.fa
-
     # Build database with concatenated files
     build_sqlite_db.py rfam_hits.db \\
-        --above-tblout above_threshold_all.tblout \\
-        --above-fasta above_threshold_all.fa \\
-        --below-tblout below_threshold_all.tblout \\
-        --below-fasta below_threshold_all.fa \\
-        --sequence-map sequence_to_genome_unique.map \\
+        --above-tblout ${above_tblout} \\
+        --above-fasta ${above_fasta} \\
+        --below-tblout ${below_tblout} \\
+        --below-fasta ${below_fasta} \\
+        --sequence-map ${seq_map_complete} \\
         --bacdive-jsonl ${bacdive_jsonl} \\
         --family-txt ${family_txt} \\
         --clan-txt ${clan_txt} \\
@@ -606,30 +690,43 @@ workflow {
     | EXTRACT_HIT_SEQUENCES_BELOW_THRESHOLD \
     | set { below_threshold_results }
 
-    // Collect above-threshold results
+    // Concatenate above-threshold results
     above_threshold_results \
     | map { accession, fasta, tblout -> tblout } \
     | collect \
-    | set { above_tblouts }
+    | CONCATENATE_ABOVE_THRESHOLD_TBLOUT \
+    | set { above_concat_tblout_and_map }
 
     above_threshold_results \
     | map { accession, fasta, tblout -> fasta } \
     | collect \
-    | set { above_fastas }
+    | CONCATENATE_ABOVE_THRESHOLD_FASTA \
+    | set { above_concat_fasta }
 
-    // Collect below-threshold results
+    // Concatenate below-threshold results
     below_threshold_results \
     | map { accession, fasta, tblout -> tblout } \
     | collect \
-    | set { below_tblouts }
+    | CONCATENATE_BELOW_THRESHOLD_TBLOUT(
+        above_concat_tblout_and_map.map { tblout, mapping -> mapping }
+    ) \
+    | set { below_concat_tblout_and_map }
 
     below_threshold_results \
     | map { accession, fasta, tblout -> fasta } \
     | collect \
-    | set { below_fastas }
+    | CONCATENATE_BELOW_THRESHOLD_FASTA \
+    | set { below_concat_fasta }
 
-    // Build SQLite database with both above and below threshold hits
-    BUILD_SQLITE_DATABASE(above_tblouts, above_fastas, below_tblouts, below_fastas, bacdive_jsonl, rfam_metadata) \
+    // Build SQLite database with concatenated files
+    BUILD_SQLITE_DATABASE(
+        above_concat_tblout_and_map,
+        above_concat_fasta,
+        below_concat_tblout_and_map,
+        below_concat_fasta,
+        bacdive_jsonl,
+        rfam_metadata
+    ) \
     | set { database }
 
     // Create alignments for all families and add to database

@@ -11,7 +11,6 @@ This script creates a comprehensive SQLite database containing:
 - BacDive genome metadata (temperature, etc.)
 """
 
-import gzip
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -23,34 +22,46 @@ from sqlite_utils import Database
 def parse_tblout_line(line: str) -> Dict[str, any]:
     """Parse a single line from cmscan tblout output (format 2).
 
-    Returns a dictionary with all 18 standard tblout columns.
+    Returns a dictionary with all tblout columns.
+    Format 2 includes an idx column as the first column.
     """
     parts = line.strip().split()
 
-    # Infernal cmscan tblout format has 18 standard columns
+    # Infernal cmscan tblout format 2 has idx + 18 standard columns
     # (plus optional description which may contain spaces)
-    if len(parts) < 18:
+    if len(parts) < 19:
         return None
 
     return {
-        "target_name": parts[0],
-        "target_accession": parts[1],
-        "query_name": parts[2],
-        "query_accession": parts[3],
-        "mdl": parts[4],
-        "mdl_from": int(parts[5]),
-        "mdl_to": int(parts[6]),
-        "seq_from": int(parts[7]),
-        "seq_to": int(parts[8]),
-        "strand": parts[9],
-        "trunc": parts[10],
-        "pass_": parts[11],  # 'pass' is a Python keyword, use 'pass_'
-        "gc": float(parts[12]),
-        "bias": float(parts[13]),
-        "score": float(parts[14]),
-        "e_value": float(parts[15]),
-        "inc": parts[16],
-        "description": " ".join(parts[17:]) if len(parts) > 17 else parts[17],
+        "idx": int(parts[0]),
+        "target_name": parts[1],
+        "target_accession": parts[2],
+        "query_name": parts[3],
+        "query_accession": parts[4],
+        "clan_name": parts[5],
+        "mdl": parts[6],
+        "mdl_from": int(parts[7]),
+        "mdl_to": int(parts[8]),
+        "seq_from": int(parts[9]),
+        "seq_to": int(parts[10]),
+        "strand": parts[11],
+        "trunc": parts[12],
+        "pass_": parts[13],  # 'pass' is a Python keyword, use 'pass_'
+        "gc": float(parts[14]),
+        "bias": float(parts[15]),
+        "score": float(parts[16]),
+        "e_value": float(parts[17]),
+        "inc": parts[18],
+        "olp": parts[19] if len(parts) > 19 else None,
+        "anyidx": int(parts[20]) if len(parts) > 20 else None,
+        "afrct1": float(parts[21]) if len(parts) > 21 else None,
+        "afrct2": float(parts[22]) if len(parts) > 22 else None,
+        "winidx": parts[23] if len(parts) > 23 else None,
+        "wfrct1": float(parts[24]) if len(parts) > 24 else None,
+        "wfrct2": float(parts[25]) if len(parts) > 25 else None,
+        "mdl_len": int(parts[26]) if len(parts) > 26 else None,
+        "seq_len": int(parts[27]) if len(parts) > 27 else None,
+        "description": " ".join(parts[28:]) if len(parts) > 28 else None,
     }
 
 
@@ -83,14 +94,14 @@ def parse_fasta(fasta_path: Path) -> Dict[str, str]:
     return sequences
 
 
-def parse_rfam_table(gz_path: Path) -> List[Dict]:
-    """Parse tab-delimited Rfam table file (gzipped).
+def parse_rfam_table(txt_path: Path) -> List[Dict]:
+    """Parse tab-delimited Rfam table file.
 
     Returns list of dictionaries with column names as keys.
     """
     rows = []
 
-    with gzip.open(gz_path, 'rt') as f:
+    with open(txt_path, 'r') as f:
         # First line is header
         header = next(f).strip().split('\t')
 
@@ -114,9 +125,9 @@ def parse_rfam_table(gz_path: Path) -> List[Dict]:
 @click.option('--below-fasta', type=click.Path(exists=True), help='Below-threshold FASTA file (concatenated)')
 @click.option('--sequence-map', required=True, type=click.Path(exists=True), help='Sequence accession to genome ID mapping file')
 @click.option('--bacdive-jsonl', required=True, type=click.Path(exists=True), help='BacDive JSONL file with genome metadata')
-@click.option('--family-txt', required=True, type=click.Path(exists=True), help='family.txt.gz file')
-@click.option('--clan-txt', required=True, type=click.Path(exists=True), help='clan.txt.gz file')
-@click.option('--clan-membership-txt', required=True, type=click.Path(exists=True), help='clan_membership.txt.gz file')
+@click.option('--family-txt', required=True, type=click.Path(exists=True), help='family.txt file')
+@click.option('--clan-txt', required=True, type=click.Path(exists=True), help='clan.txt file')
+@click.option('--clan-membership-txt', required=True, type=click.Path(exists=True), help='clan_membership.txt file')
 def main(output_db, above_tblout, above_fasta, below_tblout, below_fasta, sequence_map, bacdive_jsonl, family_txt, clan_txt, clan_membership_txt):
     """Build SQLite database from cmscan results (above and below threshold) and Rfam metadata."""
 
@@ -185,9 +196,9 @@ def main(output_db, above_tblout, above_fasta, below_tblout, below_fasta, sequen
 
         # Store sequences with lookup key
         for header, seq in sequences.items():
-            # Header format: "seqname/start-stop rfam_acc"
-            # Example: "CP001878.2/12345-12456 RF00001"
-            # The key is just the coordinate part: "seqname/start-stop"
+            # Header format: "seqname/start-stop"
+            # Example: "CP001878.2/12345-12456"
+            # Use the entire header as the key (no additional fields)
             coord_part = header.split()[0] if ' ' in header else header
             all_sequences[coord_part] = seq
 
