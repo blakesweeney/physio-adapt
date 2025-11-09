@@ -6,4 +6,6 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.3.0",
+    "sqlite-utils>=3.36",
+    "biopython>=1.80",
 ]

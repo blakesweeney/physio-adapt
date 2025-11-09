@@ -1,0 +1,19 @@
+# RNA types to extract from Rfam
+# One type per line. Lines starting with # are ignored.
+#
+# Common RNA types in Rfam:
+#   - Cis-reg (cis-regulatory elements)
+#   - Gene (protein-coding genes, rare in Rfam)
+#   - riboswitch
+#   - ribozyme
+#   - sRNA (small RNA)
+#   - snRNA (small nuclear RNA)
+#   - snoRNA (small nucleolar RNA)
+#   - tRNA (transfer RNA)
+#   - rRNA (ribosomal RNA)
+#   - miRNA (microRNA)
+#   - lncRNA (long non-coding RNA)
+#   - Intron
+#
+# Example: Extract all riboswitches
+riboswitch

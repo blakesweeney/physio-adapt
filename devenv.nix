@@ -9,11 +9,12 @@
   # https://devenv.sh/packages/
   packages = with pkgs; [
     claude-code
+    easel
     git
-    ruff
     infernal
     nextflow
-    easel
+    ruff
+    sqlite-utils
   ];
 
   # https://devenv.sh/languages/
