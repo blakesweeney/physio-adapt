@@ -491,8 +491,7 @@ process CONCATENATE_BELOW_THRESHOLD_TBLOUT {
     time '1 h'
 
     input:
-    path tblout_files
-    path above_mapping
+    tuple path(tblout_files), path(above_mapping)
 
     output:
     tuple path("below_threshold_all.tblout"), path("sequence_to_genome_all.map")
