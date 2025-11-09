@@ -267,11 +267,12 @@ process EXTRACT_HIT_SEQUENCES {
     # Create index for genome file
     esl-sfetch --index ${genome_fna}
 
-    # Extract coordinates from tblout: query_name/seq_from-seq_to
-    grep -v '^#' ${tblout} | awk '{print \$3"/"\$10"-"\$11}' > coords.txt
+    # Extract coordinates from tblout in GDF format: <newname> <from> <to> <source seqname>
+    # GDF format: newname from to source_seqname (space/tab delimited)
+    grep -v '^#' ${tblout} | awk '{print \$4"/"\$10"-"\$11, \$10, \$11, \$4}' > coords.txt
 
     # Fetch all sequences at once using esl-sfetch
-    # -C: use coordinate format (seqname/start-stop)
+    # -C: GDF format file with subseq coords
     # -f: read coordinates from file
     if [ -s coords.txt ]; then
         esl-sfetch -Cf ${genome_fna} coords.txt > ${accession}_hits.fa
@@ -416,11 +417,12 @@ process EXTRACT_HIT_SEQUENCES_BELOW_THRESHOLD {
     # Create index for genome file
     esl-sfetch --index ${genome_fna}
 
-    # Extract coordinates from tblout: query_name/seq_from-seq_to
-    grep -v '^#' ${tblout} | awk '{print \$3"/"\$10"-"\$11}' > coords.txt
+    # Extract coordinates from tblout in GDF format: <newname> <from> <to> <source seqname>
+    # GDF format: newname from to source_seqname (space/tab delimited)
+    grep -v '^#' ${tblout} | awk '{print \$4"/"\$10"-"\$11, \$10, \$11, \$4}' > coords.txt
 
     # Fetch all sequences at once using esl-sfetch
-    # -C: use coordinate format (seqname/start-stop)
+    # -C: GDF format file with subseq coords
     # -f: read coordinates from file
     if [ -s coords.txt ]; then
         esl-sfetch -Cf ${genome_fna} coords.txt > ${accession}_below_threshold_hits.fa
