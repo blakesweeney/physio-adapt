@@ -1,20 +1,35 @@
 # Multi-stage build for temperature adaptation pipeline
 FROM python:3.13-slim AS base
 
-# Install system dependencies
-# Note: infernal package includes both Infernal tools (cmscan, cmalign, cmfetch, etc.)
-# and Easel utilities (esl-sfetch, esl-alimask, etc.)
-# HMMER is also installed as it provides additional easel utilities
+# Install system dependencies and build tools
 RUN apt-get update && apt-get install -y \
     curl \
     unzip \
-    infernal \
-    hmmer \
+    wget \
+    build-essential \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Verify easel utilities are available
-RUN esl-sfetch -h > /dev/null 2>&1 || { echo "ERROR: esl-sfetch not found"; exit 1; }
+# Install Infernal from source (includes easel utilities)
+# Infernal bundles a copy of the Easel library with esl-* tools
+RUN cd /tmp && \
+    wget http://eddylab.org/infernal/infernal-1.1.5.tar.gz && \
+    tar xzf infernal-1.1.5.tar.gz && \
+    cd infernal-1.1.5 && \
+    ./configure --prefix=/usr/local && \
+    make && \
+    make install && \
+    cd easel && \
+    make install && \
+    cd /tmp && \
+    rm -rf infernal-1.1.5*
+
+# Verify all required tools are available
+RUN cmscan -h > /dev/null 2>&1 && \
+    cmalign -h > /dev/null 2>&1 && \
+    cmfetch -h > /dev/null 2>&1 && \
+    esl-sfetch -h > /dev/null 2>&1 && \
+    echo "All Infernal and Easel tools successfully installed"
 
 # Install NCBI datasets tool
 RUN curl -L https://ftp.ncbi.nlm.nih.gov/pub/datasets/command-line/v2/linux-amd64/datasets -o /usr/local/bin/datasets \
