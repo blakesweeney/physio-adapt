@@ -1,0 +1,10 @@
+ID,designation_header,strain_number_header,is_type_strain_header,species,Temperature,"Kind of temperature","Testresult (temperature)","Genome seq. accession number","Genome Sequence database"
+159652,R-68213,"DSM 105287, LMG 29911",1,"Abditibacterium utsteinense",20,growth,positive,1960156.3,patric
+,,,,,,,,GCA_002973605,ncbi
+219,,"DSM 9849, ATCC 49176, CIP 103242, SC 10, CCUG 27639",1,"Abiotrophia defectiva",25-41,growth,positive,2562617177,img
+,,,,,37,growth,positive,46125.34,patric
+,,,,,45,growth,negative,592010.4,patric
+,,,,,,,,GCA_000160075,ncbi
+164352,YH-panp20,"JCM 32769, KCTC 15747, KCTC 1574",1,"Absicoccus porci",30-40,growth,positive,GCA_003725415,ncbi
+,,,,,37,growth,positive,RJQC00000000,ncbi
+,,,,,37,optimum,positive,,

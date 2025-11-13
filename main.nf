@@ -12,6 +12,13 @@ nextflow.enable.dsl=2
  * 4. Run cmscan with Rfam covariance models
  */
 
+// Import reusable modules
+include { CONCATENATE_FILES as CONCAT_ABOVE_TBLOUT } from './modules/concatenate_files'
+include { CONCATENATE_FILES as CONCAT_ABOVE_FASTA } from './modules/concatenate_files'
+include { CONCATENATE_FILES as CONCAT_BELOW_TBLOUT } from './modules/concatenate_files'
+include { CONCATENATE_FILES as CONCAT_BELOW_FASTA } from './modules/concatenate_files'
+include { CONCATENATE_FILES as CONCAT_MAPPINGS } from './modules/concatenate_files'
+
 
 /*
  * Process 1: Convert BacDive CSV to JSONL
@@ -211,6 +218,44 @@ process DOWNLOAD_GENOME {
 }
 
 /*
+ * Process 4B: Fetch genome metadata for sequence mapping
+ */
+process FETCH_GENOME_METADATA {
+    tag "${accession}"
+    cpus 1
+    memory '1 GB'
+    time '30 min'
+    errorStrategy 'ignore'
+
+    input:
+    val accession
+
+    output:
+    tuple val(accession), path("${accession}.mapping.tsv"), optional: true
+
+    script:
+    """
+    # Fetch sequence metadata from NCBI datasets
+    datasets summary genome accession ${accession} --report sequence --as-json-lines > ${accession}.jsonl
+
+    # Extract sequence accessions and map to genome_id using jq
+    # Format: sequence_accession<TAB>genome_id
+    # Each line has genbank_accession and refseq_accession fields
+    jq -r '
+        select(.genbank_accession != null or .refseq_accession != null) |
+        (if .genbank_accession != null then .genbank_accession + "\\t" + "${accession}" else empty end),
+        (if .refseq_accession != null then .refseq_accession + "\\t" + "${accession}" else empty end)
+    ' ${accession}.jsonl > ${accession}.mapping.tsv
+
+    # Check if we got any mappings
+    if [ ! -s ${accession}.mapping.tsv ]; then
+        echo "Warning: No sequence metadata found for ${accession}" >&2
+        exit 1
+    fi
+    """
+}
+
+/*
  * Process 5: Run cmscan with Rfam models on each genome
  */
 process CMSCAN {
@@ -230,14 +275,14 @@ process CMSCAN {
     script:
     """
     # Run cmscan with Rfam cutoffs and clan information
-    cmscan --cut_ga \
-        --rfam \
-        --nohmmonly \
-        --tblout ${accession}.tblout \
-        --fmt 2 \
-        --clanin ${clanin} \
-        --cpu ${task.cpus} \
-        Rfam.cm \
+    cmscan --cut_ga \\
+        --rfam \\
+        --nohmmonly \\
+        --tblout ${accession}.tblout \\
+        --fmt 2 \\
+        --clanin ${clanin} \\
+        --cpu ${task.cpus} \\
+        Rfam.cm \\
         ${genome_fna}
     """
 }
@@ -323,7 +368,7 @@ process EXTRACT_MISSING_MODELS {
     if [ -s ${missing_models_file} ]; then
         # Extract each missing model using cmfetch
         while read -r model_acc; do
-            cmfetch ${rfam_cm[0]} "\${model_acc}" >> ${accession}.missing.cm
+            cmfetch ${rfam_cm} "\${model_acc}" >> ${accession}.missing.cm
         done < ${missing_models_file}
 
         # Press the CM file for faster searching
@@ -349,18 +394,25 @@ process CMSCAN_BELOW_THRESHOLD {
 
     script:
     """
+    # Check if clanin file has content
+    if [ -s ${clanin} ]; then
+        CLANIN_OPT="--clanin ${clanin}"
+    else
+        CLANIN_OPT=""
+    fi
+
     # Run cmscan with:
     # -T 20: report all hits with score > 0 (no threshold)
     # --rfam: use Rfam-specific settings
     # --nohmmonly: don't use HMM-only mode for any models
-    # --clanin: enable clan competition to avoid overlapping hits
+    # --clanin: enable clan competition (only if clanin file has content)
     # --fmt 2: use standard tabular output format
     cmscan -T 20 \\
         --rfam \\
         --nohmmonly \\
         --tblout ${accession}.below_threshold.tblout \\
         --fmt 2 \\
-        --clanin ${clanin} \\
+        \$CLANIN_OPT \\
         --cpu ${task.cpus} \\
         ${missing_cm[0]} \\
         ${genome_fna}
@@ -433,116 +485,10 @@ process EXTRACT_HIT_SEQUENCES_BELOW_THRESHOLD {
     """
 }
 
-/*
- * Process 7A: Concatenate above-threshold tblout files and create sequence mapping
- */
-process CONCATENATE_ABOVE_THRESHOLD_TBLOUT {
-    tag "concat_above_tblout"
-    cpus 1
-    memory '4 GB'
-    time '1 h'
-
-    input:
-    path tblout_files
-
-    output:
-    tuple path("above_threshold_all.tblout"), path("sequence_to_genome.map")
-
-    script:
-    """
-    # Concatenate tblout files (strip comments)
-    find . -name '*.tblout' -type f -exec grep -v '^#' {} \\; > above_threshold_all.tblout
-
-    # Create sequence to genome mapping
-    # For each tblout file, extract filename and column 4 (query_name)
-    find . -name '*.tblout' -type f -exec sh -c '
-        genome_id=\$(basename "{}" .tblout)
-        grep -v "^#" "{}" | awk -v gid="\$genome_id" "{print \\\$4 \"\\t\" gid}"
-    ' \\; > sequence_to_genome.map
-    """
-}
+// Concatenation processes moved to modules/concatenate_files.nf
 
 /*
- * Process 7B: Concatenate above-threshold FASTA files
- */
-process CONCATENATE_ABOVE_THRESHOLD_FASTA {
-    tag "concat_above_fasta"
-    cpus 1
-    memory '4 GB'
-    time '1 h'
-
-    input:
-    path fasta_files
-
-    output:
-    path "above_threshold_all.fa"
-
-    script:
-    """
-    find . -name '*.fa' -type f -print0 | xargs -0 cat > above_threshold_all.fa
-    """
-}
-
-/*
- * Process 7C: Concatenate below-threshold tblout files and add to sequence mapping
- */
-process CONCATENATE_BELOW_THRESHOLD_TBLOUT {
-    tag "concat_below_tblout"
-    cpus 1
-    memory '4 GB'
-    time '1 h'
-
-    input:
-    tuple path(tblout_files), path(above_mapping)
-
-    output:
-    tuple path("below_threshold_all.tblout"), path("sequence_to_genome_all.map")
-
-    script:
-    """
-    # Concatenate tblout files (strip comments)
-    find . -name '*.tblout' -type f -exec grep -v '^#' {} \\; > below_threshold_all.tblout
-
-    # Start with above-threshold mapping and add below-threshold sequences
-    cp ${above_mapping} sequence_to_genome_all.map
-
-    # Add below-threshold mappings (handle various filename patterns)
-    find . -name '*.tblout' -type f -exec sh -c '
-        fname=\$(basename "{}")
-        genome_id=\${fname%.below_threshold.tblout}
-        genome_id=\${genome_id%.best_hits.tblout}
-        genome_id=\${genome_id%.tblout}
-        grep -v "^#" "{}" | awk -v gid="\$genome_id" "{print \\\$4 \"\\t\" gid}"
-    ' \\; >> sequence_to_genome_all.map
-
-    # Remove duplicates and sort
-    sort -u sequence_to_genome_all.map -o sequence_to_genome_all.map
-    """
-}
-
-/*
- * Process 7D: Concatenate below-threshold FASTA files
- */
-process CONCATENATE_BELOW_THRESHOLD_FASTA {
-    tag "concat_below_fasta"
-    cpus 1
-    memory '4 GB'
-    time '1 h'
-
-    input:
-    path fasta_files
-
-    output:
-    path "below_threshold_all.fa"
-
-    script:
-    """
-    find . -name '*.fa' -type f -print0 | xargs -0 cat > below_threshold_all.fa
-    """
-}
-
-/*
- * Process 7E: Build SQLite database from concatenated files
+ * Process 7F: Build SQLite database from concatenated files
  */
 process BUILD_SQLITE_DATABASE {
     tag "build_database"
@@ -552,7 +498,7 @@ process BUILD_SQLITE_DATABASE {
     publishDir "${params.outdir}/database", mode: 'copy'
 
     input:
-    tuple path(above_tblout), path(seq_map_partial), path(above_fasta), path(below_tblout), path(seq_map_complete), path(below_fasta), path(bacdive_jsonl), path(family_txt), path(clan_txt), path(clan_membership_txt)
+    tuple path(above_tblout), path(above_fasta), path(below_tblout), path(below_fasta), path(sequence_map), path(bacdive_jsonl), path(family_txt), path(clan_txt), path(clan_membership_txt)
 
     output:
     path "rfam_hits.db"
@@ -565,7 +511,7 @@ process BUILD_SQLITE_DATABASE {
         --above-fasta ${above_fasta} \\
         --below-tblout ${below_tblout} \\
         --below-fasta ${below_fasta} \\
-        --sequence-map ${seq_map_complete} \\
+        --sequence-map ${sequence_map} \\
         --bacdive-jsonl ${bacdive_jsonl} \\
         --family-txt ${family_txt} \\
         --clan-txt ${clan_txt} \\
@@ -649,8 +595,11 @@ workflow {
     | splitText \
     | map { it.trim() } \
     | filter { it.length() > 0 } \
-    | DOWNLOAD_GENOME \
-    | set { genomes }
+    | set { accessions }
+
+    // Download genomes and fetch metadata in parallel
+    accessions | DOWNLOAD_GENOME | set { genomes }
+    accessions | FETCH_GENOME_METADATA | set { genome_metadata }
 
     // Run above-threshold cmscan and extract sequences
     genomes \
@@ -668,7 +617,7 @@ workflow {
 
     // Extract missing models from full Rfam.cm
     missing_models_list \
-    | combine(rfam.map { cm_files, clanin -> cm_files }) \
+    | combine(rfam.map { cm_files, clanin -> cm_files[0] }) \
     | EXTRACT_MISSING_MODELS \
     | set { missing_cm_files }
 
@@ -693,34 +642,46 @@ workflow {
     above_threshold_results \
     | map { accession, fasta, tblout -> tblout } \
     | collect \
-    | CONCATENATE_ABOVE_THRESHOLD_TBLOUT \
-    | set { above_concat_tblout_and_map }
+    | map { files -> [files, '*.tblout', 'above_threshold_all.tblout', true, false, 'concat_above_tblout'] } \
+    | CONCAT_ABOVE_TBLOUT \
+    | set { above_concat_tblout }
 
     above_threshold_results \
     | map { accession, fasta, tblout -> fasta } \
     | collect \
-    | CONCATENATE_ABOVE_THRESHOLD_FASTA \
+    | map { files -> [files, '*.fa', 'above_threshold_all.fa', false, false, 'concat_above_fasta'] } \
+    | CONCAT_ABOVE_FASTA \
     | set { above_concat_fasta }
 
     // Concatenate below-threshold results
     below_threshold_results \
     | map { accession, fasta, tblout -> tblout } \
     | collect \
-    | combine(above_concat_tblout_and_map.map { tblout, mapping -> mapping }) \
-    | CONCATENATE_BELOW_THRESHOLD_TBLOUT \
-    | set { below_concat_tblout_and_map }
+    | map { files -> [files, '*.tblout', 'below_threshold_all.tblout', true, false, 'concat_below_tblout'] } \
+    | CONCAT_BELOW_TBLOUT \
+    | set { below_concat_tblout }
 
     below_threshold_results \
     | map { accession, fasta, tblout -> fasta } \
     | collect \
-    | CONCATENATE_BELOW_THRESHOLD_FASTA \
+    | map { files -> [files, '*.fa', 'below_threshold_all.fa', false, false, 'concat_below_fasta'] } \
+    | CONCAT_BELOW_FASTA \
     | set { below_concat_fasta }
 
+    // Create sequence to genome mapping from NCBI metadata
+    genome_metadata \
+    | map { accession, mapping_tsv -> mapping_tsv } \
+    | collect \
+    | map { files -> [files, '*.mapping.tsv', 'sequence_to_genome.map', false, true, 'concat_mappings'] } \
+    | CONCAT_MAPPINGS \
+    | set { sequence_mapping }
+
     // Build SQLite database with concatenated files
-    above_concat_tblout_and_map \
+    above_concat_tblout \
     | combine(above_concat_fasta) \
-    | combine(below_concat_tblout_and_map) \
+    | combine(below_concat_tblout) \
     | combine(below_concat_fasta) \
+    | combine(sequence_mapping) \
     | combine(bacdive_jsonl) \
     | combine(rfam_metadata) \
     | BUILD_SQLITE_DATABASE \
@@ -728,6 +689,6 @@ workflow {
 
     // Create alignments for all families and add to database
     database \
-    | combine(rfam.map { cm_files, clanin -> cm_files }) \
+    | combine(rfam.map { cm_files, clanin -> cm_files[0] }) \
     | CREATE_ALIGNMENTS
 }

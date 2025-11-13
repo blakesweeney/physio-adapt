@@ -23,11 +23,11 @@ from sqlite_utils import Database
 
 def get_families_with_hits(db: Database) -> List[str]:
     """Query database to find all Rfam families that have hits."""
-    query = "SELECT DISTINCT target_name FROM hits ORDER BY target_name"
-    return [row['target_name'] for row in db.execute(query).fetchall()]
+    query = "SELECT DISTINCT rfam_acc FROM hits ORDER BY rfam_acc"
+    return [row[0] for row in db.execute(query).fetchall()]
 
 
-def get_hits_for_family(db: Database, family_id: str) -> List[Dict]:
+def get_hits_for_family(db: Database, rfam_acc: str) -> List[Dict]:
     """Get all hits for a specific family."""
     query = """
     SELECT
@@ -36,35 +36,40 @@ def get_hits_for_family(db: Database, family_id: str) -> List[Dict]:
         h.seq_from,
         h.seq_to,
         h.hit_sequence,
-        h.target_accession,
         h.strand
     FROM hits h
-    WHERE h.target_name = ?
+    WHERE h.rfam_acc = ?
     AND h.hit_sequence IS NOT NULL
     ORDER BY h.genome_id, h.query_name, h.seq_from
     """
-    return list(db.execute(query, [family_id]).fetchall())
+    rows = db.execute(query, [rfam_acc]).fetchall()
+    # Convert tuples to dictionaries
+    keys = ['genome_id', 'query_name', 'seq_from', 'seq_to', 'hit_sequence', 'strand']
+    return [dict(zip(keys, row)) for row in rows]
 
 
 def create_fasta_from_hits(hits: List[Dict], output_path: Path) -> None:
-    """Create FASTA file from hit sequences."""
+    """Create FASTA file from hit sequences.
+
+    Sequence IDs are in format: accession/start-stop
+    """
     with open(output_path, 'w') as f:
         for hit in hits:
-            # Create unique ID: genome_id:query_name:seq_from-seq_to
-            hit_id = f"{hit['genome_id']}:{hit['query_name']}:{hit['seq_from']}-{hit['seq_to']}"
+            # Create unique ID: query_name/seq_from-seq_to
+            hit_id = f"{hit['query_name']}/{hit['seq_from']}-{hit['seq_to']}"
             f.write(f">{hit_id}\n")
             f.write(f"{hit['hit_sequence']}\n")
 
 
-def run_cmalign(cm_file: Path, fasta_file: Path, output_sto: Path, family_id: str) -> bool:
+def run_cmalign(cm_file: Path, fasta_file: Path, output_sto: Path, rfam_acc: str) -> bool:
     """Run cmalign to create alignment."""
     try:
         # First, extract the CM model for this family
-        cm_extract = output_sto.parent / f"{family_id}.cm"
+        cm_extract = output_sto.parent / f"{rfam_acc}.cm"
 
-        click.echo(f"    Extracting CM model for {family_id}...")
+        click.echo(f"    Extracting CM model for {rfam_acc}...")
         subprocess.run(
-            ['cmfetch', str(cm_file), family_id],
+            ['cmfetch', str(cm_file), rfam_acc],
             stdout=open(cm_extract, 'w'),
             stderr=subprocess.PIPE,
             check=True
@@ -115,53 +120,77 @@ def parse_stockholm_alignment(sto_file: Path) -> Tuple[Dict, str, int]:
 
 def store_alignment_in_db(
     db: Database,
-    family_id: str,
+    rfam_acc: str,
     aligned_seqs: Dict[str, str],
     consensus_structure: str,
-    alignment_length: int
+    alignment_length: int,
+    sto_file: Path,
+    genome_lookup: Dict[str, str]
 ) -> None:
-    """Store alignment data in database."""
+    """Store alignment data in database.
+
+    Args:
+        db: Database connection
+        rfam_acc: Rfam family accession
+        aligned_seqs: Dictionary of sequence IDs to aligned sequences
+        consensus_structure: Consensus secondary structure
+        alignment_length: Length of alignment
+        sto_file: Path to Stockholm file (to store as blob)
+        genome_lookup: Dictionary mapping accessions to genome IDs
+    """
 
     # Store alignment metadata
     metadata = {
-        'family_id': family_id,
+        'rfam_acc': rfam_acc,
         'num_sequences': len(aligned_seqs),
         'alignment_length': alignment_length,
         'consensus_structure': consensus_structure,
         'created_date': datetime.now().isoformat()
     }
-    db['alignment_metadata'].insert(metadata, replace=True)
+    db['alignment_metadata'].insert(metadata, replace=True, strict=True)
+
+    # Store complete Stockholm file as blob
+    with open(sto_file, 'rb') as f:
+        stockholm_blob = f.read()
+
+    alignment_file_record = {
+        'rfam_acc': rfam_acc,
+        'stockholm_alignment': stockholm_blob,
+        'file_size': len(stockholm_blob),
+        'created_date': datetime.now().isoformat()
+    }
+    db['alignment_files'].insert(alignment_file_record, replace=True, strict=True)
 
     # Store individual aligned sequences
     alignments = []
     for seq_id, aligned_seq in aligned_seqs.items():
-        # Parse hit_id: genome_id:query_name:seq_from-seq_to
-        parts = seq_id.split(':')
-        if len(parts) >= 3:
-            genome_id = parts[0]
+        # Parse hit_id: accession/seq_from-seq_to
+        # Extract accession to look up genome_id
+        accession = seq_id.split('/')[0] if '/' in seq_id else seq_id
+        genome_id = genome_lookup.get(accession, None)
 
-            # Get alignment coordinates (1-indexed, without gaps)
-            # Find first and last non-gap positions
-            ungapped_pos = [i for i, c in enumerate(aligned_seq) if c != '-' and c != '.']
-            if ungapped_pos:
-                align_start = ungapped_pos[0] + 1
-                align_end = ungapped_pos[-1] + 1
-            else:
-                align_start = 0
-                align_end = 0
+        # Get alignment coordinates (1-indexed, without gaps)
+        # Find first and last non-gap positions
+        ungapped_pos = [i for i, c in enumerate(aligned_seq) if c != '-' and c != '.']
+        if ungapped_pos:
+            align_start = ungapped_pos[0] + 1
+            align_end = ungapped_pos[-1] + 1
+        else:
+            align_start = 0
+            align_end = 0
 
-            alignments.append({
-                'family_id': family_id,
-                'genome_id': genome_id,
-                'hit_id': seq_id,
-                'aligned_sequence': aligned_seq,
-                'alignment_start': align_start,
-                'alignment_end': align_end
-            })
+        alignments.append({
+            'rfam_acc': rfam_acc,
+            'genome_id': genome_id,
+            'hit_id': seq_id,
+            'aligned_sequence': aligned_seq,
+            'alignment_start': align_start,
+            'alignment_end': align_end
+        })
 
     # Batch insert all alignments for this family
-    db['alignments'].insert_all(alignments, alter=True)
-    click.echo(f"    Stored {len(alignments)} aligned sequences")
+    db['alignments'].insert_all(alignments, alter=True, strict=True)
+    click.echo(f"    Stored {len(alignments)} aligned sequences and Stockholm file ({len(stockholm_blob)} bytes)")
 
 
 @click.command()
@@ -184,6 +213,13 @@ def main(database: str, rfam_cm: str, output_dir: str, save_fasta: bool, limit: 
     output_path.mkdir(parents=True, exist_ok=True)
     click.echo(f"Saving Stockholm files to: {output_path.absolute()}")
 
+    # Build genome lookup from sequences table
+    click.echo("Building accession to genome lookup...")
+    genome_lookup = {}
+    for row in db.execute("SELECT accession, genome_id FROM sequences").fetchall():
+        genome_lookup[row[0]] = row[1]
+    click.echo(f"  Loaded {len(genome_lookup)} sequence-to-genome mappings")
+
     # Get all families with hits
     click.echo("Finding families with hits...")
     families = get_families_with_hits(db)
@@ -201,37 +237,37 @@ def main(database: str, rfam_cm: str, output_dir: str, save_fasta: bool, limit: 
         success_count = 0
         error_count = 0
 
-        for i, family_id in enumerate(families, 1):
-            click.echo(f"\n[{i}/{len(families)}] Processing {family_id}...")
+        for i, rfam_acc in enumerate(families, 1):
+            click.echo(f"\n[{i}/{len(families)}] Processing {rfam_acc}...")
 
             # Get hits for this family
-            hits = get_hits_for_family(db, family_id)
+            hits = get_hits_for_family(db, rfam_acc)
             click.echo(f"  Found {len(hits)} hits")
 
             if len(hits) == 0:
-                click.echo(f"  Skipping {family_id} (no sequences)")
+                click.echo(f"  Skipping {rfam_acc} (no sequences)")
                 continue
 
             # Create FASTA file in tmpdir
-            fasta_file = tmpdir / f"{family_id}.fa"
+            fasta_file = tmpdir / f"{rfam_acc}.fa"
             create_fasta_from_hits(hits, fasta_file)
 
             # Optionally save FASTA file to output directory
             if save_fasta:
-                output_fasta = output_path / f"{family_id}.fa"
+                output_fasta = output_path / f"{rfam_acc}.fa"
                 import shutil
                 shutil.copy2(fasta_file, output_fasta)
                 click.echo(f"  Saved FASTA: {output_fasta.name}")
 
             # Run cmalign - save Stockholm to output directory
-            sto_file = output_path / f"{family_id}.sto"
-            if run_cmalign(Path(rfam_cm), fasta_file, sto_file, family_id):
+            sto_file = output_path / f"{rfam_acc}.sto"
+            if run_cmalign(Path(rfam_cm), fasta_file, sto_file, rfam_acc):
                 # Parse alignment
                 try:
                     aligned_seqs, consensus_structure, alignment_length = parse_stockholm_alignment(sto_file)
 
                     # Store in database
-                    store_alignment_in_db(db, family_id, aligned_seqs, consensus_structure, alignment_length)
+                    store_alignment_in_db(db, rfam_acc, aligned_seqs, consensus_structure, alignment_length, sto_file, genome_lookup)
 
                     success_count += 1
                     click.echo(f"  ✓ Successfully aligned {len(aligned_seqs)} sequences (length: {alignment_length})")
@@ -245,12 +281,24 @@ def main(database: str, rfam_cm: str, output_dir: str, save_fasta: bool, limit: 
                         sto_file.unlink()
             else:
                 error_count += 1
-                click.echo(f"  ✗ cmalign failed for {family_id}")
+                click.echo(f"  ✗ cmalign failed for {rfam_acc}")
 
     click.echo(f"\n{'='*60}")
     click.echo("Alignment generation complete!")
     click.echo(f"  Successful: {success_count}/{len(families)}")
     click.echo(f"  Errors: {error_count}/{len(families)}")
+
+    # Add foreign key constraints for alignment tables
+    click.echo("\nAdding foreign key constraints for alignment tables...")
+    try:
+        db["alignments"].add_foreign_key("rfam_acc", "family", "rfam_acc", ignore=True)
+        db["alignments"].add_foreign_key("genome_id", "genomes", "genome_id", ignore=True)
+        db["alignment_metadata"].add_foreign_key("rfam_acc", "family", "rfam_acc", ignore=True)
+        db["alignment_files"].add_foreign_key("rfam_acc", "family", "rfam_acc", ignore=True)
+        click.echo("  Foreign keys added successfully")
+    except Exception as e:
+        click.echo(f"  Warning: Could not add all foreign keys: {e}", err=True)
+
     click.echo(f"\nDatabase updated: {database}")
 
 
